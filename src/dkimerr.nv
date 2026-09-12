@@ -1,0 +1,99 @@
+// dkimerr.nv — the faults, kept apart from the verdict.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A FAULT IS NOT A VERDICT, and conflating the two is the mistake this
+// module exists to prevent.  A fault is "I could not do what you asked":
+// the header does not parse, the buffer is short, you passed a limit
+// larger than the body.  A verdict is "I did what you asked and here is
+// what the signature is worth": pass, fail, none, temperror, permerror.
+// A verifier that reported a malformed header as a fault would have its
+// caller writing an error branch for a message that is simply not
+// signed, and one that reported a forgery as a fault would have its
+// caller treating a successful check as a failure.
+//
+// SO EVERYTHING THAT IS ABOUT A MESSAGE ENDS IN A VERDICT, and the
+// faults here are about the CALL.  `dkimverify.verify` answers
+// `DkimVerdict` and not a `Result` for exactly that reason.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+// Why a call could not be completed.
+pub enum DkimFault
+    // A tag list did not parse.  `at` is a byte offset into the text,
+    // because a `DKIM-Signature` header is one long line and has no
+    // other landmark.
+    DkimBadTagSyntax(at: Int, detail: Str)
+    // The same tag appeared twice.  § 3.2 makes it a syntax error, and
+    // last-wins would let an attacker who can append to a header
+    // override a domain a verifier already read.
+    DkimDuplicateTag(at: Int, name: Str)
+    // A tag the schema requires is missing.  `v`, `a`, `b`, `bh`, `d`,
+    // `h` and `s` are all required in a signature, § 3.5.
+    DkimMissingTag(name: Str)
+    // A tag's value is not what its schema allows: a `v=` that is not
+    // 1, an `l=` that is not a number, a `t=` in the future beyond what
+    // the caller allows.
+    DkimBadTagValue(name: Str, value: Str)
+    // A `b=`, `bh=` or `p=` value is not base64.
+    DkimBadBase64(name: Str)
+    // `l=` names more bytes than the canonicalised body has.  § 3.4.5
+    // makes it a verification failure rather than a truncation, because
+    // the signer claimed bytes the message does not contain.
+    DkimBodyShorterThanLength(have: Int, want: Int)
+    // The signer this package was handed could not produce a signature.
+    // `detail` is the signer's own message; nothing here interprets it,
+    // because a hardware module's refusal and an arithmetic failure are
+    // both "not my problem" from a canonicaliser's point of view.
+    DkimSignerRefused(detail: Str)
+    // A signature was asked for over an algorithm no primitive on this
+    // grid implements.  `rsa-sha256` today, and the README names the
+    // missing row.
+    DkimAlgorithmUnavailable(token: Str)
+    // A signature was asked for over an algorithm RFC 8301 forbids.
+    // Separate from unavailable, because one is a gap in this project
+    // and the other is a gap somebody is asking for on purpose.
+    DkimAlgorithmForbidden(token: Str)
+    // `h=` does not name `From`, which § 5.4 requires of every
+    // signature.  Refused at SIGNING time, because a signature without
+    // it is valid and useless — a relay may rewrite the From and it
+    // still verifies.
+    DkimFromNotSigned
+
+// The standard `Error` implementation, so a fault can be reported by
+// anything that reports errors.
+impl Error for DkimFault
+    // One line: what could not be done and, where there is one, the
+    // byte of the header it is about.
+    fn message(self) -> Str
+        todo("dkim-nv.dkimerr.DkimFault.message")
+
+// Is this fault the caller's own mistake rather than the message's?
+//
+// True for a signer refusal, an unavailable or forbidden algorithm, and
+// a `From` that was not signed — all of which are things a program did.
+// False for everything that came out of parsing a message, which is
+// data from outside and never a bug.
+//
+// Published because the two want different treatment in a log: one is
+// worth waking somebody for and the other is a Tuesday.
+//
+// ```novo
+// use dkimerr
+//
+// fn main() [io]
+//     println("${dkimerr.is_caller_fault(DkimFromNotSigned)}")
+// ```
+pub fn is_caller_fault(f: DkimFault) -> Bool []
+    todo("dkim-nv.dkimerr.is_caller_fault")
+
+// The byte of the header this fault is about, or -1.
+//
+// ```novo
+// use dkimerr
+//
+// fn main() [io]
+//     println("${dkimerr.offset_of(DkimBadTagSyntax(12, "no equals sign"))}")
+// ```
+pub fn offset_of(f: DkimFault) -> Int []
+    todo("dkim-nv.dkimerr.offset_of")

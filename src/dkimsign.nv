@@ -1,0 +1,289 @@
+// dkimsign.nv — signing, over a signer the caller supplies.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// `DkimSigner[e]` IS THE LOAD-BEARING INTERFACE, and the effect
+// parameter is why this package can be `core` at all.  A private key
+// lives in one of three places and they cost different things: in
+// memory, where signing is arithmetic and costs NOTHING; in a file the
+// program read at startup, which is the same once it is read; and in a
+// hardware module or a cloud key service, where signing is a network
+// call.  A package that took a key as bytes would work for the first
+// two and be unusable for the third; one that took a callback returning
+// `Result` would have to name an effect row, and the only honest row
+// for "whatever the caller's key does" is `[net, io, fs]`, which would
+// make this package `host` and put it out of reach of every `core`
+// consumer.
+//
+// So the signer is a trait with an effect parameter, `sign_message` is
+// `[e]`, and a caller signing with an in-memory Ed25519 key pays
+// exactly nothing.  That is the shape `docs/publishing.md` § How a
+// `core` package takes a stream from its host describes, applied to a
+// key rather than a stream.
+//
+// WHAT IS SIGNED IS NOT THE MESSAGE.  DKIM signs a hash of the
+// canonicalised body, placed in the `bh=` tag, and then signs the
+// canonicalised SIGNED HEADERS with that tag inside them.  Two hashes,
+// in that order, and the second one covers the first — which is what
+// makes `l=` possible and what makes the order non-negotiable.
+// `body_hash` and `signing_input` are published separately because a
+// signer that streams a large body computes the first while the body
+// goes past and the second afterwards.
+//
+// NOTHING IN THIS MODULE PERFORMS ANYTHING ON ITS OWN.  Every row is
+// `[]` or the `[e]` its argument supplies.
+
+use dkimcanon
+
+// Something that can turn bytes into a signature.
+//
+// `e` is the effect row the implementation supplies, and it is what
+// every signing call in this package costs.  An in-memory Ed25519 key
+// is `[]`; a key in a file read per signature is `[fs]`; a cloud key
+// service is `[net]`.  The trait is the only reason a package that
+// signs mail can sit at `core`.
+pub trait DkimSigner[e]
+    // Sign these bytes.  The bytes are already hashed and prefixed
+    // according to the algorithm, so an implementation does the
+    // primitive and nothing else.
+    fn dkim_sign(self, data: [u8]) -> Result<[u8], DkimFault> [e]
+    // Which algorithm this signer produces.  Asked before signing, so
+    // that `a=` and the key's `k=` can be checked against each other
+    // before a byte is hashed.
+    fn dkim_algorithm(self) -> DkimAlgorithm [e]
+    // The domain and selector this signer's key is published under.
+    // On the signer rather than passed separately, because a program
+    // with two keys and one selector string is a program that signs
+    // with the wrong one exactly once.
+    fn dkim_selector(self) -> Str [e]
+
+// An Ed25519 signer over a key the caller already holds.
+//
+// The one signer this package can complete today, because ed25519-nv
+// exists and nothing on this grid implements RSA.  RFC 8463 defines
+// `ed25519-sha256` and it is deployed; it is also not what most mail is
+// signed with, and the README says so rather than letting a reader
+// conclude this package can verify their inbox.
+pub struct DkimEd25519Signer
+    key: Ed25519SigningKey
+    selector: Str
+
+// Signing with an in-memory key costs NOTHING, which is what `[]` in
+// the impl head says and what the effect checker holds it to.
+impl DkimSigner[] for DkimEd25519Signer
+    // Ed25519 over the bytes, RFC 8032.
+    fn dkim_sign(self, data: [u8]) -> Result<[u8], DkimFault> []
+        todo("dkim-nv.dkimsign.DkimEd25519Signer.dkim_sign")
+
+    // Always `ed25519-sha256`.
+    fn dkim_algorithm(self) -> DkimAlgorithm []
+        todo("dkim-nv.dkimsign.DkimEd25519Signer.dkim_algorithm")
+
+    // The selector the key is published under.
+    fn dkim_selector(self) -> Str []
+        todo("dkim-nv.dkimsign.DkimEd25519Signer.dkim_selector")
+
+// A signer over an Ed25519 key and the selector it is published under.
+//
+// ```novo
+// use dkimsign
+// use ed25519
+//
+// fn main() [io]
+//     match ed25519.signing_key_from_seed([])
+//         Err(e) => println(e.message())
+//         Ok(k)  => println(dkimsign.ed25519_signer(k, "k1").selector)
+// ```
+pub fn ed25519_signer(key: Ed25519SigningKey, selector: Str) -> DkimEd25519Signer []
+    todo("dkim-nv.dkimsign.ed25519_signer")
+
+// What a signature is to say about itself, before it exists.
+//
+// Every field a signer chooses, so that a program with a signing policy
+// holds one value rather than eight arguments in an order it can get
+// wrong.  `signed_headers` defaults to `dkimcanon.recommended_headers`
+// in `default_request`, and `From` in it is checked rather than
+// assumed.
+pub struct DkimSignRequest
+    domain: Str
+    canon: DkimCanon
+    signed_headers: [Str]
+    // The `l=` value, or -1 for "do not write one".  -1 rather than 0,
+    // because 0 is a legal length meaning "I signed no body", and
+    // `l=0` with a body is how a message gets signed and then
+    // completely rewritten.
+    body_length: Int
+    // `t=`, Unix seconds, or -1 for absent.  A PARAMETER and never a
+    // clock read, because a `core` package has none — and because a
+    // signature with a fixed timestamp is reproducible, which is what
+    // makes a test of a signer a test rather than a snapshot.
+    signed_at: Int
+    // `x=`, Unix seconds, or -1.
+    expires_at: Int
+    // `i=`, or `""`.
+    identity: Str
+
+// A request signing the recommended headers of this domain, relaxed on
+// both halves, with no `l=`, no timestamps and no identity.
+//
+// No `l=` on purpose: the length tag lets a mailing list append a
+// footer without breaking the signature, and lets an attacker append
+// anything at all.  A signer that wants it asks for it.
+//
+// ```novo
+// use dkimsign
+//
+// fn main() [io]
+//     println(dkimsign.default_request("example.test").domain)
+// ```
+pub fn default_request(domain: Str) -> DkimSignRequest []
+    todo("dkim-nv.dkimsign.default_request")
+
+// The `bh=` value: SHA-256 over the canonicalised body.
+//
+// Its own function because it is computed FIRST and separately — a
+// signer streaming a large body computes this while the body goes past
+// and the signing input afterwards, and a package that only offered the
+// whole operation would make that impossible.
+//
+// `limit` is the `l=` value or -1.  A body shorter than a positive
+// limit is a fault rather than a truncation, § 3.4.5.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+// use dkimsign
+//
+// fn main() [io]
+//     match dkimsign.body_hash(DkimRelaxed, [], 0 - 1)
+//         Ok(h)  => println("${list.len(h)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn body_hash(k: DkimCanonKind, body: [u8], limit: Int) -> Result<[u8], DkimFault> []
+    todo("dkim-nv.dkimsign.body_hash")
+
+// The bytes a signature is computed over: the canonicalised signed
+// headers, then the canonicalised `DKIM-Signature` header with an
+// empty `b=` and no trailing CRLF.
+//
+// Published because it is the value a verifier recomputes and a signer
+// produces, and the one thing worth comparing byte for byte when a
+// signature does not verify.  A package that hid it inside `sign` would
+// leave "it does not verify and I cannot see why" as the only
+// available diagnosis.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+// use dkimsign
+//
+// fn main() [io]
+//     println("${list.len(dkimsign.signing_input([], DkimRelaxed, [], [], [], "v=1; b="))}")
+// ```
+pub fn signing_input(out: [u8], k: DkimCanonKind, signed: [Str], names: [Str], values: [Str],
+                     signature_value: Str) -> [u8] []
+    todo("dkim-nv.dkimsign.signing_input")
+
+// The unsigned `DKIM-Signature` value a request produces: every tag
+// filled in, `bh=` computed, and `b=` present and empty.
+//
+// The step before the signature exists, and the one that refuses a
+// request `From` is not in — § 5.4 requires it, and a signature without
+// it is valid and useless.
+//
+// ```novo
+// use dkimsign
+//
+// fn main() [io]
+//     match dkimsign.unsigned_value(dkimsign.default_request("example.test"),
+//                                   DkimEd25519Sha256, "k1", [])
+//         Ok(v)  => println(v)
+//         Err(e) => println(e.message())
+// ```
+pub fn unsigned_value(r: DkimSignRequest, a: DkimAlgorithm, selector: Str,
+                      body_hash: [u8]) -> Result<Str, DkimFault> []
+    todo("dkim-nv.dkimsign.unsigned_value")
+
+// Sign a message, answering the finished `DKIM-Signature` field value.
+//
+// THE ROW IS `[e]`: this call costs exactly what `S`'s own `DkimSigner`
+// impl costs, and that impl is declared where the signer is.  It is the
+// whole argument for the trait, written as one function.
+//
+// `names` and `values` are the message's header fields in the order
+// they appear; `body` is the raw body.  The order of operations is
+// § 3.7's and is not negotiable: the body hash first, then the tag
+// value with it in, then the signing input over the signed headers and
+// that value, then the primitive.
+//
+// The caller prepends `DKIM-Signature:` and the returned value to the
+// message, ABOVE every header it signed — which is where a verifier
+// expects the newest signature and what makes a second signature over
+// the first possible.
+//
+// ```novo
+// use dkimsign
+//
+// fn note<S: dkimsign.DkimSigner[e]>(with: S, r: DkimSignRequest,
+//                                    names: [Str], values: [Str],
+//                                    body: [u8]) -> Result<Str, DkimFault> [e]
+//     dkimsign.sign_message(with, r, names, values, body)
+//
+// fn main() [io]
+//     println("a signature charged what the key costs")
+// ```
+pub fn sign_message<S: DkimSigner[e]>(with: S, r: DkimSignRequest, names: [Str], values: [Str],
+                                      body: [u8]) -> Result<Str, DkimFault> [e]
+    todo("dkim-nv.dkimsign.sign_message")
+
+// Sign bytes a caller already produced with `signing_input`.
+//
+// The streaming half: a signer that hashed a four-gigabyte body while
+// it went past holds the signing input and nothing else, and calls
+// this.  Same row, same argument.
+//
+// ```novo
+// use std.list
+// use dkimsign
+//
+// fn raw<S: dkimsign.DkimSigner[e]>(with: S, input: [u8]) -> Result<[u8], DkimFault> [e]
+//     dkimsign.sign_input(with, input)
+//
+// fn main() [io]
+//     println("the primitive, over bytes the caller built")
+// ```
+pub fn sign_input<S: DkimSigner[e]>(with: S, input: [u8]) -> Result<[u8], DkimFault> [e]
+    todo("dkim-nv.dkimsign.sign_input")
+
+// Is this request one a conforming signature can be built from?
+//
+// `None` when it is fine, and the fault otherwise: `From` not in `h=`,
+// an `x=` at or before `t=`, an `l=` of less than -1.  Asked before
+// anything is hashed, because a four-gigabyte body should not be read
+// to discover that `h=` is wrong.
+//
+// ```novo
+// use dkimsign
+//
+// fn main() [io]
+//     match dkimsign.request_fault(dkimsign.default_request("example.test"))
+//         Some(e) => println(e.message())
+//         None    => println("the request is fine")
+// ```
+pub fn request_fault(r: DkimSignRequest) -> ?DkimFault []
+    todo("dkim-nv.dkimsign.request_fault")
+
+// The field name a signature is written under: `DKIM-Signature`.
+//
+// A function rather than a constant everybody spells, because the
+// canonicalisation lowercases it and the message does not, and a
+// caller that had both spellings would use the wrong one once.
+//
+// ```novo
+// use dkimsign
+//
+// fn main() [io]
+//     println(dkimsign.signature_field_name())
+// ```
+pub fn signature_field_name() -> Str []
+    todo("dkim-nv.dkimsign.signature_field_name")

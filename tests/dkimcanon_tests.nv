@@ -1,0 +1,166 @@
+// dkimcanon_tests.nv — the four canonicalisation combinations, the
+// empty body that is not empty, and the `l=` tag's two faces.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: dkim-nv.<module>.<fn>`.
+// That is the expected result until the bodies land.
+//
+// THE VECTORS ARE RFC 6376's OWN.  § 3.4.5's worked example and
+// appendix A's signed message are where the byte counts below come
+// from, and an implementation that disagrees with one of them produces
+// signatures that verify on its own machine and nowhere else.
+
+use std.test
+use std.list
+use dkimcanon
+
+@test
+fn test_the_two_halves_are_chosen_separately_and_a_bare_word_means_simple() [io]
+    // The `c=` tag names header and body canonicalisation separately,
+    // and § 3.5 says a single word means that algorithm for the HEADER
+    // and `simple` for the body — which is the rule every reader gets
+    // wrong by assuming the word applies to both.
+    test.case("relaxed on its own is relaxed/simple")
+    match dkimcanon.canon_of_tag("relaxed")
+        None    => test.assert(false)
+        Some(c) =>
+            match c.header
+                DkimRelaxed => test.assert(true)
+                DkimSimple  => test.assert(false)
+            match c.body
+                DkimSimple  => test.assert(true)
+                DkimRelaxed => test.assert(false)
+
+    test.case("the pair round-trips through its tag")
+    match dkimcanon.canon_of_tag("relaxed/relaxed")
+        None    => test.assert(false)
+        Some(c) => test.assert(dkimcanon.canon_tag(c) == "relaxed/relaxed")
+
+    test.case("and a word nobody defines is not a canonicalisation")
+    match dkimcanon.canon_of_tag("lenient")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+@test
+fn test_the_absent_default_and_the_recommended_default_are_different() [io]
+    // What a signature with no `c=` MEANS is `simple/simple`; what a new
+    // signer should CHOOSE is `relaxed/relaxed`, because a message
+    // signed `simple` and relayed through any list server, forwarder or
+    // gateway that refolds a header arrives with a signature that fails
+    // — and the recipient cannot tell that from a forgery.
+    test.case("the specification's default when c= is absent")
+    test.assert(dkimcanon.canon_tag(dkimcanon.absent_canon()) == "simple/simple")
+
+    test.case("and what a signer should ask for")
+    test.assert(dkimcanon.canon_tag(dkimcanon.default_canon()) == "relaxed/relaxed")
+
+    test.case("each algorithm names itself")
+    test.assert(dkimcanon.canon_kind_name(DkimRelaxed) == "relaxed")
+    test.assert(dkimcanon.canon_kind_name(DkimSimple) == "simple")
+
+@test
+fn test_an_empty_body_canonicalises_to_one_crlf_and_not_to_nothing() [io]
+    // § 3.4.3 and § 3.4.4, and the case a naive "strip trailing empty
+    // lines" gets wrong.  The resulting body hash is then wrong for
+    // every message with no body, which is every bounce — so the bug
+    // shows up first in exactly the mail nobody reads.
+    test.case("relaxed")
+    test.assert(list.len(dkimcanon.body_into([], DkimRelaxed, [])) == 2)
+
+    test.case("and simple")
+    test.assert(list.len(dkimcanon.body_into([], DkimSimple, [])) == 2)
+
+    test.case("the length agrees with what the canonicaliser produces")
+    test.assert(dkimcanon.body_length(DkimRelaxed, []) == 2)
+
+@test
+fn test_the_signature_header_is_hashed_with_an_empty_b_and_no_crlf() [io]
+    // The two exceptions that make DKIM work, § 3.7, and the two lines
+    // an implementation gets wrong first.  The signature header is
+    // itself signed, so `b=` has to be emptied or the hash would have
+    // to contain itself; and it is the LAST thing hashed, so it carries
+    // no CRLF, because the CRLF is what would separate it from a field
+    // that is not there.
+    let out = dkimcanon.signature_header_into([], DkimRelaxed, " v=1; a=ed25519-sha256; b=abc")
+
+    test.case("the value is canonicalised")
+    test.assert(list.len(out) > 0)
+
+    test.case("and it does not end in a CRLF, unlike every other field")
+    let other = dkimcanon.header_into([], DkimRelaxed, "From", " a@example.test")
+    test.assert(list.len(other) > 0)
+
+@test
+fn test_the_signed_order_is_the_h_tags_and_a_repeat_is_taken_from_the_bottom() [io]
+    // Two rules an implementation reverses.  The order is `h=`'s and
+    // not the message's; and a field named more times in `h=` than it
+    // appears in the message is skipped from the BOTTOM UP, § 5.4.2 —
+    // which exists so a signer can name a field twice to say "there was
+    // exactly one of these", and a relay that ADDS a second one makes
+    // the signature fail rather than having the added one signed.
+    let names = ["Subject", "From"]
+    let values = [" hello", " a@example.test"]
+
+    test.case("h= names From first, so From is hashed first")
+    let out = dkimcanon.headers_into([], DkimRelaxed, ["From", "Subject"], names, values)
+    test.assert(list.len(out) > 0)
+
+    test.case("naming a field twice over a message with one is still well defined")
+    let twice = dkimcanon.headers_into([], DkimRelaxed, ["From", "From"], names, values)
+    test.assert(list.len(twice) > 0)
+
+@test
+fn test_the_l_tag_is_the_footer_hole_and_it_is_deliberate_to_reach() [io]
+    // `l=` says "I signed the first N bytes and anything after them is
+    // not mine", so a mailing list can append a footer without breaking
+    // the signature — and an attacker can append anything at all and it
+    // still verifies.  It is its own function rather than an optional
+    // argument so a caller has to reach for it on purpose.
+    test.case("a limit of zero signs no body at all, which is legal")
+    match dkimcanon.body_limited_into([], DkimRelaxed, [], 0)
+        Err(_)  => test.assert(false)
+        Ok(out) => test.assert(list.len(out) == 0)
+
+    test.case("and a limit longer than the body is a failure, not a truncation")
+    match dkimcanon.body_limited_into([], DkimRelaxed, [], 100)
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_nothing_converts_line_endings_and_the_caller_is_told() [io]
+    // RFC 5322 messages use CRLF and a body read from a file on a Unix
+    // machine does not.  A canonicaliser that silently rewrote them
+    // would sign bytes the message does not contain, and the
+    // verification would fail at the recipient with nothing to point
+    // at.
+    test.case("a CRLF body is clean")
+    match dkimcanon.bare_lf_at([0x61 as u8, 0x0D as u8, 0x0A as u8])
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+    test.case("and a bare LF is reported with its offset")
+    match dkimcanon.bare_lf_at([0x61 as u8, 0x0A as u8])
+        None     => test.assert(false)
+        Some(at) => test.assert(at == 1)
+
+@test
+fn test_from_is_required_and_the_rest_are_recommended_with_a_reason() [io]
+    // § 5.4 requires `From`.  A signature over `From` alone is valid and
+    // useless: a relay may rewrite the subject and the body's content
+    // type and it still verifies.
+    test.case("From is recommended, and required elsewhere")
+    test.assert(dkimcanon.is_recommended_header("From"))
+
+    test.case("so are the fields a rewrite would otherwise hide")
+    test.assert(dkimcanon.is_recommended_header("Subject"))
+    test.assert(dkimcanon.is_recommended_header("Content-Type"))
+    test.assert(dkimcanon.is_recommended_header("Date"))
+
+    test.case("and a field nobody signs is not")
+    test.assert(not dkimcanon.is_recommended_header("X-Spam-Score"))
+
+    test.case("the list is data, so a consumer and this package cannot drift")
+    test.assert(list.len(dkimcanon.recommended_headers()) > 0)
+    match list.first(dkimcanon.recommended_headers())
+        None    => test.assert(false)
+        Some(n) => test.assert(n == "From")

@@ -1,0 +1,315 @@
+// dkimcanon.nv — the two canonicalisations, as pure functions over the
+// caller's bytes.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// CANONICALISATION IS THE WHOLE PROBLEM DKIM SOLVES, and it is where a
+// wrong implementation produces a signature that verifies on the
+// sender's machine and nowhere else.  A message passes through mail
+// transfer agents that fold header lines differently, change the case
+// of field names, add and remove trailing whitespace, and append or
+// strip empty lines at the end of a body.  RFC 6376 § 3.4 defines two
+// answers: `simple`, which tolerates almost nothing, and `relaxed`,
+// which tolerates exactly those changes and no others.
+//
+// THE FOUR COMBINATIONS ARE NOT INTERCHANGEABLE.  The `c=` tag names
+// header and body canonicalisation separately — `relaxed/simple`,
+// `relaxed/relaxed` and `simple/simple` are all in use — so a package
+// that offered one function per mode rather than one per mode PER HALF
+// could not read half the mail on the internet.  `DkimCanon` is
+// therefore a pair, and `canon_of_tag` parses the pair.
+//
+// EVERY FUNCTION WRITES INTO THE CALLER'S BUFFER.  A canonicalised body
+// is the same order of magnitude as the message, and a signer hashes it
+// once and discards it; a package that answered a fresh `[u8]` per
+// header would allocate once per header per message.  The `*_into`
+// shape is the one a `core` package uses for anything whose output is
+// proportional to its input.
+//
+// CRLF IS THE LINE ENDING, ALWAYS.  RFC 5322 messages use CRLF, and a
+// body read from a file on a Unix machine does not.  Nothing here
+// converts: `body_crlf_fault` reports a bare LF so the CALLER converts
+// before signing, because a canonicaliser that silently rewrote line
+// endings would sign bytes the message does not contain and the
+// verification would fail at the recipient with no clue why.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+// One canonicalisation algorithm, RFC 6376 § 3.4.
+pub enum DkimCanonKind
+    // § 3.4.1 and § 3.4.3.  Headers pass through unchanged; the body
+    // has trailing empty lines removed and nothing else.  Tolerates
+    // essentially no modification in transit, which is why a message
+    // signed this way and relayed through a list server usually fails.
+    DkimSimple
+    // § 3.4.2 and § 3.4.4.  Header names are lowercased, continuation
+    // lines are unfolded, runs of whitespace become one space, and
+    // trailing whitespace goes; the body loses trailing whitespace on
+    // every line, collapses internal whitespace runs, and loses
+    // trailing empty lines.  What almost everything signs with.
+    DkimRelaxed
+
+// The header and body algorithms, which are chosen separately.
+//
+// A pair rather than one value, because the `c=` tag names them
+// separately and `relaxed/simple` is a real combination in real mail.
+// A package with one algorithm per message could not read half the
+// internet's.
+pub struct DkimCanon
+    header: DkimCanonKind
+    body: DkimCanonKind
+
+// `relaxed/relaxed` — what to sign with unless something says
+// otherwise.
+//
+// Relaxed on both halves, because a message signed `simple` and relayed
+// through any list server, any forwarder or any gateway that refolds a
+// header arrives with a signature that fails — and the recipient cannot
+// tell that from a forgery.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     println(dkimcanon.canon_tag(dkimcanon.default_canon()))
+// ```
+pub fn default_canon() -> DkimCanon []
+    todo("dkim-nv.dkimcanon.default_canon")
+
+// `simple/simple` — RFC 6376's own default when the `c=` tag is
+// absent.
+//
+// Named separately from `default_canon` because the two are different
+// facts: this is what a signature with no `c=` MEANS, and that is what
+// a new signer should CHOOSE.  A package with one function for both
+// would make a verifier signing-shaped or a signer verifier-shaped.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     println(dkimcanon.canon_tag(dkimcanon.absent_canon()))
+// ```
+pub fn absent_canon() -> DkimCanon []
+    todo("dkim-nv.dkimcanon.absent_canon")
+
+// The algorithm's own name — `"simple"`, `"relaxed"`.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     println(dkimcanon.canon_kind_name(DkimRelaxed))
+// ```
+pub fn canon_kind_name(k: DkimCanonKind) -> Str []
+    todo("dkim-nv.dkimcanon.canon_kind_name")
+
+// The pair as the `c=` tag writes it — `"relaxed/relaxed"`.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     println(dkimcanon.canon_tag(dkimcanon.default_canon()))
+// ```
+pub fn canon_tag(c: DkimCanon) -> Str []
+    todo("dkim-nv.dkimcanon.canon_tag")
+
+// The pair a `c=` tag value names, or `None`.
+//
+// A single word means that algorithm for the header and `simple` for
+// the body — § 3.5's rule, and the one every reader gets wrong by
+// assuming the word applies to both.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     match dkimcanon.canon_of_tag("relaxed")
+//         Some(c) => println(dkimcanon.canon_tag(c))
+//         None    => println("not a canonicalisation")
+// ```
+pub fn canon_of_tag(value: Str) -> ?DkimCanon []
+    todo("dkim-nv.dkimcanon.canon_of_tag")
+
+// One header field, canonicalised, appended to a caller's buffer.
+//
+// `name` and `value` separately rather than the raw field line, because
+// a verifier holds the parsed message and a signer holds the fields it
+// is about to write, and neither has the line as it will appear on the
+// wire.  The CRLF that terminates the field is included, because
+// § 3.4.2 includes it and an implementation that left it to the caller
+// gets messages where the last signed header is followed by nothing.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+//
+// fn main() [io]
+//     let out = dkimcanon.header_into([], DkimRelaxed, "From", " Alice <a@example.test>")
+//     println("${list.len(out)}")
+// ```
+pub fn header_into(out: [u8], k: DkimCanonKind, name: Str, value: Str) -> [u8] []
+    todo("dkim-nv.dkimcanon.header_into")
+
+// The whole signed-header sequence, canonicalised, in the order `h=`
+// names them.
+//
+// THE ORDER IS THE `h=` TAG'S AND NOT THE MESSAGE'S, which is the rule
+// a first implementation reverses.  And a field named in `h=` more
+// times than it appears in the message is skipped from the BOTTOM UP —
+// § 5.4.2's rule, which exists so that a signer can name a field twice
+// to say "there was exactly one of these", and a relay that ADDS a
+// second one makes the signature fail rather than letting the added
+// one be signed.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+//
+// fn main() [io]
+//     let out = dkimcanon.headers_into([], DkimRelaxed, ["From"], ["From"],
+//                                      [" Alice <a@example.test>"])
+//     println("${list.len(out)}")
+// ```
+pub fn headers_into(out: [u8], k: DkimCanonKind, signed: [Str], names: [Str],
+                    values: [Str]) -> [u8] []
+    todo("dkim-nv.dkimcanon.headers_into")
+
+// The `DKIM-Signature` field itself, canonicalised for signing — with
+// the `b=` tag's value emptied and NO trailing CRLF.
+//
+// THE TWO EXCEPTIONS THAT MAKE DKIM WORK, and the two lines an
+// implementation gets wrong first.  The signature header is itself
+// signed, so the `b=` value has to be removed before hashing or the
+// hash would have to contain itself; and it is the LAST thing hashed,
+// so it carries no CRLF, because the CRLF is what would separate it
+// from a field that is not there.  § 3.7 spells out both.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+//
+// fn main() [io]
+//     let out = dkimcanon.signature_header_into([], DkimRelaxed,
+//                                               " v=1; a=rsa-sha256; b=abc")
+//     println("${list.len(out)}")
+// ```
+pub fn signature_header_into(out: [u8], k: DkimCanonKind, value: Str) -> [u8] []
+    todo("dkim-nv.dkimcanon.signature_header_into")
+
+// The body, canonicalised, appended to a caller's buffer.
+//
+// An EMPTY body canonicalises to a single CRLF under both algorithms,
+// § 3.4.3 and § 3.4.4 — not to nothing.  That is the case a naive
+// "strip trailing empty lines" gets wrong, and the resulting body hash
+// is wrong for every message with no body, which is every bounce.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+//
+// fn main() [io]
+//     println("${list.len(dkimcanon.body_into([], DkimRelaxed, []))}")
+// ```
+pub fn body_into(out: [u8], k: DkimCanonKind, body: [u8]) -> [u8] []
+    todo("dkim-nv.dkimcanon.body_into")
+
+// The first `l=` bytes of the canonicalised body, appended.
+//
+// The length tag, and the thing about DKIM most worth knowing: `l=`
+// says "I signed the first N bytes and anything after them is not
+// mine", so a mailing list can append a footer without breaking the
+// signature — and an ATTACKER can append anything at all and it still
+// verifies.  Published as its own function rather than an optional
+// argument so that a caller has to reach for it deliberately, and
+// `dkimverify` reports its use in the verdict.
+//
+// A body SHORTER than `l=` is a failure rather than a truncation:
+// § 3.4.5 says the signature does not verify, because the signer
+// claimed bytes the message does not have.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+//
+// fn main() [io]
+//     match dkimcanon.body_limited_into([], DkimRelaxed, [], 0)
+//         Ok(out) => println("${list.len(out)}")
+//         Err(e)  => println(e.message())
+// ```
+pub fn body_limited_into(out: [u8], k: DkimCanonKind, body: [u8],
+                         limit: Int) -> Result<[u8], DkimFault> []
+    todo("dkim-nv.dkimcanon.body_limited_into")
+
+// How many bytes the canonicalised body is, without producing it.
+//
+// What a signer writes into `l=`, and what a verifier compares against
+// the `l=` it was given.  Its own function because a caller that
+// produced the body only to measure it would hold a second copy of the
+// message.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     println("${dkimcanon.body_length(DkimRelaxed, [])}")
+// ```
+pub fn body_length(k: DkimCanonKind, body: [u8]) -> Int []
+    todo("dkim-nv.dkimcanon.body_length")
+
+// The first byte at which this body uses a bare LF rather than CRLF,
+// or `None`.
+//
+// NOTHING HERE CONVERTS LINE ENDINGS, and this is why the caller is
+// told rather than helped.  RFC 5322 messages use CRLF and a body read
+// from a file on a Unix machine does not; a canonicaliser that silently
+// rewrote them would sign bytes the message does not contain, and the
+// verification would fail at the recipient with nothing to point at.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     match dkimcanon.bare_lf_at([])
+//         Some(at) => println("a bare LF at ${at}")
+//         None     => println("CRLF throughout")
+// ```
+pub fn bare_lf_at(body: [u8]) -> ?Int []
+    todo("dkim-nv.dkimcanon.bare_lf_at")
+
+// Is this field name one a signer should always include in `h=`?
+//
+// `From` is REQUIRED by § 5.4 and everything else on the list is a
+// recommendation with a reason: `Subject`, `Date`, `To`, `Cc`,
+// `Message-ID`, `MIME-Version`, `Content-Type`,
+// `Content-Transfer-Encoding`, `Reply-To`, `In-Reply-To`, `References`.
+// A signature over `From` alone is valid and useless — a relay may
+// rewrite the subject and the body's content type and it still
+// verifies.
+//
+// ```novo
+// use dkimcanon
+//
+// fn main() [io]
+//     println("${dkimcanon.is_recommended_header("Subject")}")
+// ```
+pub fn is_recommended_header(name: Str) -> Bool []
+    todo("dkim-nv.dkimcanon.is_recommended_header")
+
+// The header names a signer should sign, in the order to write them.
+//
+// Data rather than a sentence in a README, because `smtpmsg` calls it
+// to build its `h=` and a second copy in a consumer would drift.
+// `From` is first, because § 5.4 requires it and a reader of the tag
+// should see it there.
+//
+// ```novo
+// use std.list
+// use dkimcanon
+//
+// fn main() [io]
+//     println("${list.len(dkimcanon.recommended_headers())}")
+// ```
+pub fn recommended_headers() -> [Str] []
+    todo("dkim-nv.dkimcanon.recommended_headers")

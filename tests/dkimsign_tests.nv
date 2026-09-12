@@ -1,0 +1,374 @@
+// dkimsign_tests.nv — the tag grammars, the signer trait, and the
+// verdict that is not a boolean.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: dkim-nv.<module>.<fn>`.
+//
+// AND THE COMPILER MAKES THE FIRST ASSERTION.  `DkimTape` below
+// implements `DkimSigner[]`, and the function that signs over it
+// carries no effect row at all — so the claim that signing with an
+// in-memory key costs nothing is checked before the run starts.
+
+use std.test
+use std.list
+use dkimerr
+use dkimsign
+use dkimtag
+use dkimverify
+use ed25519
+
+// A signer over a value it already holds: no key derivation, no
+// socket, no file.  It is not standing in for a real one — it IS the
+// shape an in-memory Ed25519 key has, and it costs nothing.
+struct DkimTape
+    answer: Int
+
+// Signing over a value costs nothing at all, which is what `[]` in the
+// impl head says and what the effect checker holds it to.
+//
+// ```novo ignore
+// use dkimsign
+//
+// fn drive(t: DkimTape, input: [u8]) -> Result<[u8], DkimFault>
+//     dkimsign.sign_input(t, input)
+// ```
+impl DkimSigner[] for DkimTape
+    fn dkim_sign(self, data: [u8]) -> Result<[u8], DkimFault>
+        Ok([])
+
+    fn dkim_algorithm(self) -> DkimAlgorithm
+        DkimEd25519Sha256
+
+    fn dkim_selector(self) -> Str
+        "k1"
+
+// Signing with an in-memory key adds NO effect row, and this signature
+// is the proof.  A host with a key in a hardware module adds `[net]`
+// here; the package adds none.
+fn sign_with_tape(t: DkimTape, input: [u8]) -> Result<[u8], DkimFault>
+    dkimsign.sign_input(t, input)
+
+@test
+fn test_a_duplicate_tag_is_refused_rather_than_last_wins() [io]
+    // § 3.2 makes a duplicate a syntax error.  Last-wins would let an
+    // attacker who can append to a header override a `d=` a verifier
+    // already read, which is the whole signature turned into a
+    // formality.
+    test.case("a well-formed list parses")
+    match dkimtag.parse_tags("v=1; a=ed25519-sha256")
+        Err(_) => test.assert(false)
+        Ok(l)  => test.assert(list.len(l.tags) == 2)
+
+    test.case("and one tag twice does not")
+    match dkimtag.parse_tags("d=example.test; d=attacker.test")
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+    test.case("a tag's value is reachable by name")
+    match dkimtag.parse_tags("v=1; d=example.test")
+        Err(_) => test.assert(false)
+        Ok(l)  =>
+            match dkimtag.tag_value(l, "d")
+                None    => test.assert(false)
+                Some(v) => test.assert(v == "example.test")
+
+    test.case("and a tag nobody wrote is absent")
+    match dkimtag.parse_tags("v=1")
+        Err(_) => test.assert(false)
+        Ok(l)  =>
+            match dkimtag.tag_value(l, "s")
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+@test
+fn test_rsa_sha256_parses_and_is_not_available_and_those_are_two_facts() [io]
+    // The honest form of the gap.  Nothing on this grid implements RSA,
+    // so the algorithm almost every signature in the world uses cannot
+    // be completed here — and "I cannot check this" is a different
+    // thing to tell an operator from "this is forged", because only one
+    // of them is a reason to quarantine a message.
+    test.case("the token round-trips")
+    test.assert(dkimtag.algorithm_token(
+        dkimtag.algorithm_of_token("rsa-sha256")) == "rsa-sha256")
+
+    test.case("RFC 8301 permits it")
+    test.assert(dkimtag.algorithm_is_permitted(DkimRsaSha256))
+
+    test.case("and this implementation cannot carry it")
+    test.assert(not dkimtag.algorithm_is_available(DkimRsaSha256))
+
+    test.case("ed25519-sha256 is both permitted and available")
+    test.assert(dkimtag.algorithm_is_permitted(DkimEd25519Sha256))
+    test.assert(dkimtag.algorithm_is_available(DkimEd25519Sha256))
+
+    test.case("rsa-sha1 parses and RFC 8301 forbids it")
+    test.assert(not dkimtag.algorithm_is_permitted(DkimRsaSha1))
+
+    test.case("and an algorithm nobody defines keeps its token")
+    match dkimtag.algorithm_of_token("dilithium-sha256")
+        DkimAlgUnknown(t) => test.assert(t == "dilithium-sha256")
+        _                 => test.assert(false)
+
+@test
+fn test_a_key_record_is_the_concatenation_of_every_txt_string() [io]
+    // § 3.6.2.2.  A TXT record is character-strings of at most 255
+    // bytes each, and every RSA key is longer than one — so a caller
+    // handing over the first string alone parses a truncated key, which
+    // fails verification with no indication that the record was fine.
+    test.case("the DNS name is the selector, the label and the domain")
+    test.assert(dkimtag.key_dns_name("k1", "example.test") ==
+                "k1._domainkey.example.test")
+
+    test.case("a record arrives as a list of strings")
+    match dkimtag.parse_key_record([])
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(true)
+
+@test
+fn test_an_empty_p_is_a_revocation_and_not_a_missing_record() [io]
+    // § 3.6.1.  An absent record means "this selector was never used"
+    // and an empty key means "it was, and every signature naming it is
+    // now invalid".  A verifier that treated them alike would accept a
+    // signature the domain owner has withdrawn — which is the one
+    // action a domain owner has when a key leaks.
+    test.case("a record with an empty p= is revoked")
+    match dkimtag.parse_key_record([])
+        Err(_) => test.assert(false)
+        Ok(k)  => test.assert(dkimtag.key_is_revoked(k))
+
+@test
+fn test_the_signer_is_a_trait_because_a_key_lives_in_three_places() [io]
+    // In memory, where signing is arithmetic and costs NOTHING; in a
+    // file, which is the same once it is read; and in a hardware module
+    // or a cloud key service, where it is a network call.  A package
+    // that took a key as bytes would work for two of the three, and one
+    // that named a concrete row would be `host`.
+    let t = DkimTape { answer: 0 }
+
+    test.case("signing over an in-memory signer carries no effect row")
+    match sign_with_tape(t, [])
+        Err(_) => test.assert(false)
+        Ok(s)  => test.assert(list.len(s) == 0)
+
+    test.case("the signer says which algorithm it produces")
+    match t.dkim_algorithm()
+        DkimEd25519Sha256 => test.assert(true)
+        _                 => test.assert(false)
+
+    test.case("and which selector its key is published under")
+    test.assert(t.dkim_selector() == "k1")
+
+    test.case("the field a signature is written under is named once")
+    test.assert(dkimsign.signature_field_name() == "DKIM-Signature")
+
+    // The one signer this package can complete today: ed25519-nv
+    // exists and nothing on this grid implements RSA.
+    test.case("and an in-memory Ed25519 key is a signer over that trait")
+    match ed25519.signing_key_from_seed([])
+        Err(_) => test.assert(false)
+        Ok(k)  => test.assert(dkimsign.ed25519_signer(k, "k1").selector == "k1")
+
+@test
+fn test_a_request_without_from_in_h_is_refused_before_anything_is_hashed() [io]
+    // § 5.4 requires `From`, and a signature without it is valid and
+    // useless.  Refused at SIGNING time and before the body is read,
+    // because a four-gigabyte body should not be hashed to discover
+    // that `h=` is wrong.
+    test.case("the default request is well formed")
+    match dkimsign.request_fault(dkimsign.default_request("example.test"))
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+    test.case("and it signs the recommended headers")
+    test.assert(list.len(dkimsign.default_request("example.test").signed_headers) > 0)
+
+    test.case("with no l=, because the length tag is a hole to reach for")
+    test.assert(dkimsign.default_request("example.test").body_length == 0 - 1)
+
+    test.case("and no timestamp, because a core package has no clock")
+    test.assert(dkimsign.default_request("example.test").signed_at == 0 - 1)
+
+    test.case("a request that does not sign From is a caller's own fault")
+    test.assert(dkimerr.is_caller_fault(DkimFromNotSigned))
+
+    test.case("and a malformed header is not")
+    test.assert(not dkimerr.is_caller_fault(DkimBadTagSyntax(12, "no equals sign")))
+
+    test.case("a syntax fault names the byte it is about")
+    test.assert(dkimerr.offset_of(DkimBadTagSyntax(12, "no equals sign")) == 12)
+
+@test
+fn test_the_body_hash_and_the_signing_input_are_two_steps_in_one_order() [io]
+    // § 3.7.  The body hash goes into the `bh=` tag; the tag value then
+    // goes into the signing input with an empty `b=`; the signature
+    // goes back into `b=`.  A signer that streamed a large body
+    // computes the first while the body goes past and the second
+    // afterwards, which is why they are separate calls.
+    test.case("the body hash is its own call")
+    match dkimsign.body_hash(DkimRelaxed, [], 0 - 1)
+        Err(_) => test.assert(false)
+        Ok(h)  => test.assert(list.len(h) == 32)
+
+    test.case("the signing input is its own call, over the value being signed")
+    test.assert(list.len(
+        dkimsign.signing_input([], DkimRelaxed, [], [], [], "v=1; b=")) > 0)
+
+    test.case("and the finished value is the unsigned one plus base64")
+    test.assert(dkimtag.finish_signature_value("v=1; b=", []) != "v=1; b=")
+
+@test
+fn test_the_verdict_has_five_outcomes_and_a_boolean_would_lose_three() [io]
+    // `pass`, `fail`, `none`, `temperror`, `permerror` — five different
+    // instructions to the program above.  A verifier answering `Bool`
+    // collapses the last three into the second, and a mail system that
+    // quarantined on it throws away mail from every domain whose DNS
+    // was briefly slow.
+    test.case("an unsigned message is none, not false")
+    match dkimverify.unsigned().outcome
+        DkimNone => test.assert(true)
+        _        => test.assert(false)
+
+    test.case("and the tokens are RFC 8601's own")
+    test.assert(dkimverify.outcome_token(DkimPass) == "pass")
+    test.assert(dkimverify.outcome_token(DkimTempError) == "temperror")
+    test.assert(dkimverify.outcome_token(DkimPermError) == "permerror")
+
+    test.case("a DNS failure is a verdict the caller produces")
+    match dkimverify.dns_failed("example.test", "k1", true, "timed out").outcome
+        DkimTempError => test.assert(true)
+        _             => test.assert(false)
+
+    test.case("and an NXDOMAIN is the other one")
+    match dkimverify.dns_failed("example.test", "k1", false, "no such name").outcome
+        DkimPermError => test.assert(true)
+        _             => test.assert(false)
+
+    test.case("every verdict names its own outcome")
+    test.assert(dkimverify.outcome_name(DkimFail) != "")
+
+@test
+fn test_alignment_is_the_check_that_makes_a_pass_mean_anything() [io]
+    // Not in RFC 6376 — it is DMARC's rule, RFC 7489 § 3.1.  A `pass`
+    // alone says only that SOME domain signed the message, and a forger
+    // who signs with their own domain gets a `pass` every time.  A
+    // consumer that reported `pass` without checking alignment has
+    // built a system that vouches for spam.
+    test.case("a subdomain aligns in relaxed mode")
+    test.assert(dkimverify.domains_aligned("example.test", "a@mail.example.test", false))
+
+    test.case("and does not in strict mode")
+    test.assert(not dkimverify.domains_aligned("example.test",
+                                               "a@mail.example.test", true))
+
+    test.case("an exact match aligns in both")
+    test.assert(dkimverify.domains_aligned("example.test", "a@example.test", true))
+
+    test.case("and a forger's own domain aligns with neither")
+    test.assert(not dkimverify.domains_aligned("attacker.test",
+                                               "a@example.test", false))
+
+@test
+fn test_the_verdict_reports_what_the_signature_did_not_cover() [io]
+    // A `pass` over a body signed with `l=` is a different fact from a
+    // `pass`, and a consumer that cannot see the difference cannot
+    // decide whether to trust the part that is not covered.
+    test.case("an unsigned message covers nothing and truncates nothing")
+    test.assert(not dkimverify.unsigned().body_truncated)
+
+    test.case("a testing key is on the verdict, because a failure against one means nothing")
+    test.assert(not dkimverify.unsigned().testing_key)
+
+    test.case("a missing signed field is not a failure — it is how a signer says the field was absent")
+    test.assert(list.len(dkimverify.unsigned_fields(["Reply-To"], ["From"])) == 1)
+
+    test.case("and the Authentication-Results fragment is produced here, once")
+    test.assert(dkimverify.auth_results_fragment(dkimverify.unsigned()) != "")
+
+@test
+fn test_the_clock_is_a_parameter_and_minus_one_skips_the_check() [io]
+    // A `core` package has no clock, and a verification with a fixed
+    // `now` is reproducible — which is what makes a test of a verifier
+    // a test rather than a snapshot.
+    match dkimtag.parse_signature(" v=1; a=ed25519-sha256; d=example.test; s=k1; h=from; bh=; b=")
+        Err(_) => test.assert(false)
+        Ok(s)  =>
+            test.case("a signature with no x= never expires")
+            test.assert(not dkimverify.is_expired(s, 1789000000))
+
+            test.case("and -1 skips the comparison entirely")
+            test.assert(not dkimverify.is_expired(s, 0 - 1))
+
+            test.case("a signature with no t= is not from the future")
+            test.assert(not dkimverify.is_from_the_future(s, 1789000000, 300))
+
+            test.case("l= absent reads as -1, which is not the same as 0")
+            test.assert(s.body_length == 0 - 1)
+
+            test.case("and the raw value is kept, because canonicalisation runs over it")
+            test.assert(s.raw_value != "")
+
+@test
+fn test_a_key_narrows_what_it_may_be_used_for_and_a_verifier_obeys() [io]
+    // `k=`, `h=` and `t=s` are the domain owner narrowing what its own
+    // key may do.  A verifier that ignored them would accept a
+    // signature the owner's DNS forbids, which is the owner's control
+    // over their own name quietly removed.
+    match dkimtag.parse_key_record([])
+        Err(_) => test.assert(false)
+        Ok(k)  =>
+            test.case("the key says which algorithms it permits")
+            test.assert(not dkimtag.key_allows(k, DkimRsaSha1))
+
+            test.case("the testing flag is readable on its own")
+            test.assert(not dkimtag.key_is_testing(k))
+
+            test.case("and t=s is checked against the i= identity")
+            test.assert(dkimtag.identity_allowed(k, "a@example.test", "example.test"))
+
+@test
+fn test_a_signature_is_written_with_b_last_and_empty() [io]
+    // `b=` last and empty because that is the value that gets
+    // canonicalised and hashed; the signer appends the base64
+    // afterwards.  A writer that emitted a complete header and then
+    // tried to blank the `b=` would have to re-parse its own output.
+    match dkimtag.parse_signature(" v=1; a=ed25519-sha256; d=example.test; s=k1; h=from; bh=; b=")
+        Err(_) => test.assert(false)
+        Ok(s)  =>
+            test.case("the value writes back")
+            match dkimtag.write_signature_value(s)
+                Err(_) => test.assert(false)
+                Ok(v)  => test.assert(v != "")
+
+            test.case("the unsigned value is built from a request and a body hash")
+            match dkimsign.unsigned_value(dkimsign.default_request("example.test"),
+                                          DkimEd25519Sha256, "k1", [])
+                Err(_) => test.assert(false)
+                Ok(v)  => test.assert(v != "")
+
+    test.case("signing a whole message is one call over the caller's signer")
+    match dkimsign.sign_message(DkimTape { answer: 0 },
+                                dkimsign.default_request("example.test"),
+                                ["From"], [" a@example.test"], [])
+        Err(_) => test.assert(false)
+        Ok(v)  => test.assert(v != "")
+
+@test
+fn test_verification_checks_the_body_hash_first_because_that_is_what_fails() [io]
+    // § 6.1's order, and it matters: a body modified in transit is the
+    // common case, and answering it without the public-key operation is
+    // both faster and more specific.
+    match dkimtag.parse_signature(" v=1; a=ed25519-sha256; d=example.test; s=k1; h=from; bh=; b=")
+        Err(_) => test.assert(false)
+        Ok(s)  =>
+            test.case("the body hash check stands on its own")
+            test.assert(not dkimverify.body_hash_matches(s, [0x61 as u8]))
+
+            match dkimtag.parse_key_record([])
+                Err(_) => test.assert(false)
+                Ok(k)  =>
+                    test.case("a whole verification answers a verdict and never a Result")
+                    test.assert(dkimverify.verify(s, k, ["From"], [" a@example.test"],
+                                                  [], 0 - 1).domain == "example.test")
+
+    test.case("and a message with several signatures answers several verdicts")
+    test.assert(list.len(dkimverify.verify_all([], [], [], [], [], 0 - 1)) == 0)

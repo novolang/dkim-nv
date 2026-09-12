@@ -1,0 +1,84 @@
+[package]
+name        = "dkim-nv"
+license     = "Apache-2.0"
+version     = "0.0.1"
+description = "DKIM (RFC 6376) as arithmetic over a caller's bytes: the simple and relaxed canonicalisations for header and body, the body hash with its l= length, the DKIM-Signature and _domainkey tag grammars parsed and written, signing over a DkimSigner[e] the caller supplies, and verification against a DNS TXT record the caller already fetched, answering a five-way verdict with its reason.  Interface only — every body is a todo()."
+
+# `license` sits immediately after the name, before any value that could
+# contain a square bracket.  The publish reads it with a pattern that
+# stops at the first `[`, so a description naming an effect row or an
+# effect-parameterised trait hides it and the release records no licence
+# at all — silently.
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and the one row that is not `[]` is `[e]` — the effect
+# parameter `DkimSigner[e]` binds.  That trait is why this package can
+# be `core` at all: a private key lives in memory, in a file, or in a
+# hardware module, and those cost nothing, `[fs]` and `[net]`.  A
+# package that took a key as bytes would work for the first two and be
+# unusable for the third; one that named a concrete row would be `host`
+# and out of reach of every `core` consumer.  So the signer is the
+# caller's, `sign_message` is `[e]`, and signing with an in-memory
+# Ed25519 key costs nothing at all.
+#
+# NO RESOLVER, and that is the second half of the same decision.  The
+# `_domainkey` TXT record arrives as the strings the caller fetched.
+# That is what makes a verifier testable against RFC 6376's own vectors
+# with no network, and what lets a caller with a DNS cache use it.
+#
+# NO DEVICE CLAIM.  A microcontroller does not sign mail, and the
+# README says so rather than shipping a probe nobody's consumer needs.
+layer       = "core"
+
+category    = "networking"
+
+tags        = ["dkim", "email", "rfc6376", "smtp", "signing", "authentication", "dmarc"]
+repository  = "https://github.com/novolang/dkim-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Canonicalise, hash, sign, and say what the verdict is worth"
+
+[dependencies]
+# SHA-256, for the body hash and for the hash inside every signature.
+# `hashing.sha256` is the one entry point this package needs; crypto-nv
+# is `core`, so it costs a consumer no effects.
+#
+# What crypto-nv does NOT carry is RSA, and that is this package's one
+# named gap: `rsa-sha256` is what almost every DKIM signature in the
+# world uses, `dkimtag.algorithm_is_available` answers false for it
+# today, and the README names the missing row.
+crypto-nv = "^0.1"
+
+# Ed25519-SHA256, RFC 8463 — the one algorithm this package can
+# complete.  `Ed25519SigningKey` is in the public surface because
+# `dkimsign.ed25519_signer` takes one, which is the rule that a package
+# declares what its own signatures mention.
+ed25519-nv = "^0.0.1"
+
+# The `b=`, `bh=` and `p=` tags are base64, and the folding whitespace
+# inside a `b=` value is this package's problem rather than every
+# consumer's.  Standard alphabet with padding, which is what RFC 6376
+# § 3.5 specifies — NOT the base64url an h2c upgrade uses, and the
+# difference is a signature that verifies nowhere.
+base64-nv = "^0.0.1"
+
+# NOT dns-codec-nv, and the absence is the design.  A `core` package has
+# no resolver; `dkimtag.parse_key_record` takes the character-strings a
+# caller already fetched, which is exactly the shape of dns-codec-nv's
+# own `RdataTxt(strings: [[u8]])`.  Depending on a parser for a record
+# this package never fetches would buy nothing and cost every consumer
+# a dependency.
+#
+# NOT smtp-nv, in the other direction: that package is `host` and it is
+# the consumer.  The README says what its message builder calls.

@@ -1,0 +1,299 @@
+// dkimverify.nv — the verdict, with every reason it can be, over a key
+// the caller already fetched.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A VERDICT IS NOT A BOOLEAN AND IT IS NOT A `Result`.  RFC 6376 § 6.1
+// and RFC 8601 both define five outcomes and they are five different
+// instructions to the program above: `pass` means the domain vouched
+// for this message; `fail` means somebody claimed it did and the
+// arithmetic says otherwise; `none` means nobody claimed anything;
+// `temperror` means ask again later, because the DNS did not answer;
+// `permerror` means the signature is malformed and asking again will
+// not help.  A verifier that answered `Bool` collapses the last three
+// into the second, and a mail system that quarantined on it throws away
+// mail from every domain whose DNS was briefly slow.
+//
+// SO `DkimVerdict` CARRIES THE REASON AND NOT JUST THE OUTCOME, and
+// `verdict_outcome` is what a policy engine switches on while
+// `verdict_reason` is what goes in the `Authentication-Results` header
+// a human reads three weeks later.
+//
+// NO DNS HERE.  The key record arrives as the strings the caller
+// fetched, because a `core` package has no resolver.  That is not a
+// limitation being worked around: it is what makes a verifier testable
+// against RFC 6376's own vectors with no network, and what lets a
+// caller with a DNS cache use it.  `DkimVerdictTempError` is the
+// verdict for "I could not fetch it", and the caller produces it — this
+// package cannot know the difference between a timeout and an NXDOMAIN.
+//
+// THE CLOCK IS A PARAMETER.  `x=` expiry is an arithmetic comparison
+// against a time the caller read, exactly as `grpcmeta.remaining` takes
+// elapsed nanoseconds, because a `core` package has no clock and a
+// verification with a fixed `now` is reproducible.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+// What a verification concluded, RFC 8601 § 2.7.1.
+pub enum DkimOutcome
+    // The signature verified.  The domain in `d=` vouched for the
+    // signed headers and the signed part of the body, and NOTHING ELSE
+    // — which is the sentence every consumer of DKIM should have read.
+    DkimPass
+    // A signature was present and does not verify.
+    DkimFail
+    // No signature at all.  Not a failure: most mail is unsigned.
+    DkimNone
+    // The check could not be completed and retrying might help: the DNS
+    // did not answer.
+    DkimTempError
+    // The check could not be completed and retrying will not help: the
+    // header is malformed, the key is revoked, the algorithm is one
+    // this implementation does not carry.
+    DkimPermError
+
+// The verdict, with everything a report needs.
+//
+// `domain` and `selector` are on the verdict rather than left to the
+// caller to carry, because an `Authentication-Results` line names them
+// and because a message with three signatures produces three verdicts
+// that are otherwise indistinguishable.
+pub struct DkimVerdict
+    outcome: DkimOutcome
+    // One line, for a person and for the `reason=` of an
+    // `Authentication-Results` header.
+    reason: Str
+    domain: Str
+    selector: Str
+    algorithm: DkimAlgorithm
+    // TRUE when `l=` was present, so the signature covers a PREFIX of
+    // the body and anything after it is unsigned.  On the verdict
+    // because a `pass` over a truncated body is a different fact from a
+    // `pass`, and a consumer that cannot see the difference cannot
+    // decide whether to trust the part that is not covered.
+    body_truncated: Bool
+    // How many bytes of the body the signature covers, or -1 for all of
+    // it.
+    body_covered: Int
+    // TRUE when the key's `t=y` flag was set.  § 3.6.1: a verifier MUST
+    // NOT treat a failure against a testing key as evidence of
+    // anything.
+    testing_key: Bool
+
+// The outcome a verdict reached.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println(dkimverify.outcome_name(DkimPass))
+// ```
+pub fn outcome_name(o: DkimOutcome) -> Str []
+    todo("dkim-nv.dkimverify.outcome_name")
+
+// The outcome as `Authentication-Results` spells it — `"pass"`,
+// `"fail"`, `"none"`, `"temperror"`, `"permerror"`.
+//
+// The specification's own tokens, because a log line a person greps has
+// to match RFC 8601's vocabulary rather than this package's taste.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println(dkimverify.outcome_token(DkimTempError))
+// ```
+pub fn outcome_token(o: DkimOutcome) -> Str []
+    todo("dkim-nv.dkimverify.outcome_token")
+
+// The verdict for a message with no `DKIM-Signature` at all.
+//
+// A constructor rather than a caller building one, because `none` with
+// an empty domain and an unknown algorithm is a shape three consumers
+// would otherwise each invent.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println(dkimverify.outcome_token(dkimverify.unsigned().outcome))
+// ```
+pub fn unsigned() -> DkimVerdict []
+    todo("dkim-nv.dkimverify.unsigned")
+
+// The verdict for a signature whose key could not be fetched.
+//
+// The caller produces this, because this package has no resolver and
+// cannot tell a timeout from an NXDOMAIN — and the two are a
+// `temperror` and a `permerror` respectively.  Published so the
+// reason text and the fields are the same as every other verdict's.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     let v = dkimverify.dns_failed("example.test", "k1", true, "timed out")
+//     println(dkimverify.outcome_token(v.outcome))
+// ```
+pub fn dns_failed(domain: Str, selector: Str, temporary: Bool, detail: Str) -> DkimVerdict []
+    todo("dkim-nv.dkimverify.dns_failed")
+
+// Verify one signature against one key record.
+//
+// THE CALL, and it answers a verdict rather than a `Result` because
+// every way a message can be wrong is a verdict and only a caller's
+// mistake is a fault — and there is no caller mistake left by this
+// point, since the signature and the key have already parsed.
+//
+// `now_unix` is the time the CALLER read, or -1 to skip the `x=` check.
+// A `core` package has no clock, and a verification with a fixed `now`
+// is reproducible, which is what makes a test of a verifier a test.
+//
+// The order of checks is § 6.1's and it matters: the body hash FIRST,
+// because a body that was modified in transit is the common case and
+// answering it without the public-key operation is both faster and more
+// specific; then the signature; then the policy tags.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println("a verdict over a key the caller fetched")
+// ```
+pub fn verify(sig: DkimSignature, key: DkimKeyRecord, names: [Str], values: [Str], body: [u8],
+              now_unix: Int) -> DkimVerdict []
+    todo("dkim-nv.dkimverify.verify")
+
+// Verify every `DKIM-Signature` on a message, newest first.
+//
+// A LIST of verdicts and not one, because a message may carry several
+// and RFC 6376 § 6.1 is explicit that a verifier may stop at the first
+// `pass` — which means the decision "how many do I check" belongs to
+// the caller, and a package that made it would be making a
+// denial-of-service trade on the caller's behalf: each signature is a
+// public-key operation and a message can carry a thousand.
+//
+// `keys` is parallel to the signatures the caller found, one record
+// each, because fetching them is `[net]` and happens outside.
+//
+// ```novo
+// use std.list
+// use dkimverify
+//
+// fn main() [io]
+//     println("${list.len(dkimverify.verify_all([], [], [], [], [], 0 - 1))}")
+// ```
+pub fn verify_all(sigs: [DkimSignature], keys: [DkimKeyRecord], names: [Str], values: [Str],
+                  body: [u8], now_unix: Int) -> [DkimVerdict] []
+    todo("dkim-nv.dkimverify.verify_all")
+
+// Does the body hash in this signature match this body?
+//
+// The first half of a verification, published separately because it is
+// the half that fails: a body modified in transit is the common case,
+// and a caller diagnosing one wants to know whether the public-key
+// operation was even reached.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println("the body hash check, on its own")
+// ```
+pub fn body_hash_matches(sig: DkimSignature, body: [u8]) -> Bool []
+    todo("dkim-nv.dkimverify.body_hash_matches")
+
+// The names of the signed headers that are MISSING from the message.
+//
+// § 5.4.2: naming a field in `h=` that the message does not have is how
+// a signer says "there was no Reply-To, and if one turns up it is not
+// mine" — so a missing field is NOT a failure and this list is not an
+// error.  It is published because a verifier reporting a `fail` should
+// be able to say which added header caused it, and because a consumer
+// showing a signature to a person wants to show what it covers.
+//
+// ```novo
+// use std.list
+// use dkimverify
+//
+// fn main() [io]
+//     println("${list.len(dkimverify.unsigned_fields([], []))}")
+// ```
+pub fn unsigned_fields(signed: [Str], names: [Str]) -> [Str] []
+    todo("dkim-nv.dkimverify.unsigned_fields")
+
+// Has this signature expired against this time?
+//
+// False when `x=` is absent or `now_unix` is -1.  RFC 6376 § 3.5 says
+// `x=` must be greater than `t=`, and a verifier SHOULD treat a
+// signature past it as invalid — "should", so the check is published
+// separately and the verdict reports it rather than the caller having
+// no say.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println("the expiry comparison, over a clock the caller read")
+// ```
+pub fn is_expired(sig: DkimSignature, now_unix: Int) -> Bool []
+    todo("dkim-nv.dkimverify.is_expired")
+
+// Is this signature's `t=` in the future by more than `slack` seconds?
+//
+// A signature stamped tomorrow is either a clock skew of a few minutes
+// or a forgery attempt, and the difference is a number the caller
+// chooses.  Published because a verifier that ignored it would accept a
+// signature whose `x=` has not started counting.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println("the future-timestamp check")
+// ```
+pub fn is_from_the_future(sig: DkimSignature, now_unix: Int, slack: Int) -> Bool []
+    todo("dkim-nv.dkimverify.is_from_the_future")
+
+// Is the signature's `d=` the same domain as the `From` header's, or a
+// parent of it?
+//
+// **THIS IS THE CHECK THAT MAKES DKIM MEAN ANYTHING**, and it is not in
+// RFC 6376 — it is DMARC's alignment rule, RFC 7489 § 3.1.  A `pass`
+// alone says only that SOME domain signed the message, and a forger who
+// signs with their own domain gets a `pass` every time.  A consumer that
+// reported `pass` without checking alignment has built a system that
+// vouches for spam.
+//
+// Published here rather than left to a DMARC package because there is
+// no DMARC package on this grid and a verifier that shipped without the
+// check would be shipping the mistake.
+//
+// `strict` is DMARC's `adkim=s`: exact equality rather than
+// organisational-domain matching.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println("${dkimverify.domains_aligned("example.test", "a@mail.example.test", false)}")
+// ```
+pub fn domains_aligned(signing_domain: Str, from_address: Str, strict: Bool) -> Bool []
+    todo("dkim-nv.dkimverify.domains_aligned")
+
+// The `Authentication-Results` fragment this verdict is, RFC 8601 § 2.2.
+//
+// `dkim=pass header.d=example.test header.s=k1 header.a=ed25519-sha256`
+// — the shape a receiving mail system prepends and every downstream
+// filter parses.  Published because a verifier that answered a verdict
+// and left the header to the caller would have every caller producing a
+// slightly different one.
+//
+// ```novo
+// use dkimverify
+//
+// fn main() [io]
+//     println(dkimverify.auth_results_fragment(dkimverify.unsigned()))
+// ```
+pub fn auth_results_fragment(v: DkimVerdict) -> Str []
+    todo("dkim-nv.dkimverify.auth_results_fragment")

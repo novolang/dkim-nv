@@ -1,0 +1,404 @@
+// dkimtag.nv — the tag=value lists: the `DKIM-Signature` header, and
+// the DNS TXT record the public key arrives in.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// TWO TAG LISTS AND ONE GRAMMAR.  RFC 6376 § 3.2 defines `tag=value`
+// pairs separated by semicolons, with whitespace allowed around
+// everything, and BOTH the signature header and the key record use it.
+// One parser, two schemas, so a reader of one cannot meet a
+// tolerance the other does not have.
+//
+// NO DNS HERE.  The key record arrives as the strings a caller already
+// fetched — `dns-codec-nv`'s `RdataTxt` is a LIST of strings and they
+// are concatenated before parsing, which § 3.6.2.2 requires and which
+// a caller handing over the first string alone gets wrong for every key
+// over 255 bytes, which is every RSA key.  A `core` package has no
+// resolver and this one does not pretend otherwise: `dkimverify` takes
+// the record as a value, and the host that fetched it is where `[net]`
+// lives.
+//
+// AN UNKNOWN TAG IS IGNORED AND KEPT.  § 3.2 says a verifier must
+// ignore tags it does not recognise — that is the extension point
+// `a=ed25519-sha256` itself arrived through — and a relay that
+// re-emitted a signature would have to re-emit them, so
+// `DkimTagList.extra` carries them rather than discarding them.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+use dkimcanon
+
+// One `tag=value` pair, with the value exactly as written.
+//
+// The value is NOT unfolded or unescaped here, because `b=` and `bh=`
+// are base64 with folding whitespace inside them and `h=` is a
+// colon-separated list with whitespace around the colons: the
+// per-tag readers do it, and a generic one that guessed would corrupt
+// one of the three.
+pub struct DkimTag
+    name: Str
+    value: Str
+
+// A parsed tag list, with the tags nobody has a schema for kept.
+pub struct DkimTagList
+    tags: [DkimTag]
+    // Tags this package does not define, in the order they appeared.
+    // Kept rather than discarded because § 3.2 requires a verifier to
+    // ignore them and a relay to preserve them, and those are two
+    // different things a package that dropped them could do neither of.
+    extra: [DkimTag]
+
+// Which signing algorithm a signature names.
+pub enum DkimAlgorithm
+    // `rsa-sha256`, § 3.3.3.  What almost every signature in the world
+    // uses, and THE MISSING PRIMITIVE on this grid: nothing here
+    // implements RSA, and the README names the row.
+    DkimRsaSha256
+    // `ed25519-sha256`, RFC 8463.  Over ed25519-nv, which exists — so
+    // this is the algorithm this package can actually complete today.
+    DkimEd25519Sha256
+    // `rsa-sha1`, RFC 6376 § 3.3.3, HISTORIC.  RFC 8301 forbids both
+    // signing and verifying with it.  It is a variant rather than a
+    // parse failure so that a verifier can report "this signature uses
+    // a forbidden algorithm" instead of "this is not a signature",
+    // which are different things to tell an operator.
+    DkimRsaSha1
+    // Anything else, with the token kept so a verdict can name it.
+    DkimAlgUnknown(token: Str)
+
+// What `q=` names as the way to fetch the key.
+pub enum DkimQueryMethod
+    // `dns/txt`, the only method RFC 6376 defines.
+    DkimDnsTxt
+    // Anything else, kept.  A signature naming only methods a verifier
+    // does not implement is unverifiable rather than invalid, and the
+    // verdict says so.
+    DkimQueryUnknown(token: Str)
+
+// A `DKIM-Signature` header, parsed.
+//
+// `body_hash` and `signature` are the DECODED bytes of `bh=` and `b=`,
+// because base64 with folding whitespace in it is this module's problem
+// and not every consumer's.  `raw_value` is the field value exactly as
+// it appeared, because `dkimcanon.signature_header_into` has to
+// canonicalise the ORIGINAL bytes — a re-serialised header would hash
+// differently and the signature would never verify.
+pub struct DkimSignature
+    // `v=`, which must be `1`.
+    version: Int
+    algorithm: DkimAlgorithm
+    // `d=` — the signing domain, which is what a verdict is ABOUT.
+    domain: Str
+    // `s=` — the selector, which with the domain names the DNS record.
+    selector: Str
+    // `h=` — the signed header names, in signing order.
+    signed_headers: [Str]
+    // `c=`.
+    canon: DkimCanon
+    // `bh=`, decoded.
+    body_hash: [u8]
+    // `b=`, decoded.
+    signature: [u8]
+    // `l=`, or -1 when the tag is absent.  -1 rather than 0, because 0
+    // is a legal length that means "I signed no body at all" and the
+    // two have opposite consequences.
+    body_length: Int
+    // `t=` — when it was signed, Unix seconds, or -1.
+    signed_at: Int
+    // `x=` — when it expires, Unix seconds, or -1.
+    expires_at: Int
+    // `i=` — the agent or user identifier, or `""`.
+    identity: Str
+    // `q=`, in the order written.
+    query_methods: [DkimQueryMethod]
+    // `z=` — the copied header fields, for diagnosis only.  Never
+    // verified against anything, and § 3.5 says so: they are what the
+    // signer SAW, kept so a human can compare.
+    copied_headers: [Str]
+    // The field value exactly as it arrived.  What canonicalisation
+    // runs over, and the reason this struct is not enough on its own to
+    // reproduce a verification.
+    raw_value: Str
+    extra: [DkimTag]
+
+// A `_domainkey` TXT record, parsed.
+pub struct DkimKeyRecord
+    // `v=`, which must be `DKIM1` when present.
+    version: Str
+    // `k=` — the key type, `rsa` or `ed25519`.  Defaults to `rsa` when
+    // absent, § 3.6.1.
+    key_type: Str
+    // `p=`, decoded.  An EMPTY list is not a missing key: § 3.6.1 says
+    // an empty `p=` means the key has been REVOKED, and a verifier must
+    // fail the signature rather than treat the record as absent.
+    public_key: [u8]
+    // `h=` — the hash algorithms this key may be used with, or empty
+    // for "any".
+    hash_algorithms: [Str]
+    // `s=` — the service types, or empty for "any".  `email` is the
+    // only one defined.
+    service_types: [Str]
+    // `t=` — the flags.  `y` means testing and `s` means the `i=`
+    // identity's domain must equal `d=` exactly.
+    flags: [Str]
+    // `n=` — a note for a human reading the DNS.  Never acted on.
+    notes: Str
+    extra: [DkimTag]
+
+// Parse a `tag=value` list, § 3.2.
+//
+// The generic reader both schemas are built on.  Refuses a duplicate
+// tag rather than taking the last: § 3.2 makes a duplicate a syntax
+// error, and last-wins would let an attacker who can append to a header
+// override the domain a verifier already read.
+//
+// ```novo
+// use std.list
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_tags("v=1; a=ed25519-sha256")
+//         Ok(l)  => println("${list.len(l.tags)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn parse_tags(text: Str) -> Result<DkimTagList, DkimFault> []
+    todo("dkim-nv.dkimtag.parse_tags")
+
+// One tag's value, or `None`.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_tags("v=1; d=example.test")
+//         Err(e) => println(e.message())
+//         Ok(l) =>
+//             match dkimtag.tag_value(l, "d")
+//                 Some(v) => println(v)
+//                 None    => println("absent")
+// ```
+pub fn tag_value(l: DkimTagList, name: Str) -> ?Str []
+    todo("dkim-nv.dkimtag.tag_value")
+
+// A `DKIM-Signature` field value, parsed.
+//
+// Takes the value WITHOUT the field name, which is what a message
+// parser hands over and what `dkimcanon.signature_header_into` also
+// takes — so the two cannot disagree about where the value starts.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_signature(" v=1; a=ed25519-sha256; d=example.test; s=k1; h=from; bh=; b=")
+//         Ok(s)  => println(s.domain)
+//         Err(e) => println(e.message())
+// ```
+pub fn parse_signature(value: Str) -> Result<DkimSignature, DkimFault> []
+    todo("dkim-nv.dkimtag.parse_signature")
+
+// The signature as a field value, folded, with `b=` LAST and EMPTY.
+//
+// `b=` last and empty because that is the value that gets
+// canonicalised and hashed; the signer appends the base64 of the
+// signature to it afterwards, and `finish_signature_value` is that
+// append.  A writer that emitted a complete header and then tried to
+// blank the `b=` would have to re-parse its own output.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println("a signature header, minus its signature")
+// ```
+pub fn write_signature_value(s: DkimSignature) -> Result<Str, DkimFault> []
+    todo("dkim-nv.dkimtag.write_signature_value")
+
+// The same value with the signature bytes base64-ed into its `b=`.
+//
+// The last step of signing, and its own function because the value
+// before it is what was hashed: a caller holds both, and a package
+// that only answered the finished one would make the two impossible to
+// compare when a verification fails.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println(dkimtag.finish_signature_value("v=1; b=", []))
+// ```
+pub fn finish_signature_value(unsigned_value: Str, signature: [u8]) -> Str []
+    todo("dkim-nv.dkimtag.finish_signature_value")
+
+// The DNS name a signature's key lives at:
+// `<selector>._domainkey.<domain>`.
+//
+// Published rather than left to the caller to concatenate, because the
+// `_domainkey` label is the one piece of DKIM every caller has to
+// spell and the one nothing else in a mail stack would tell them.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println(dkimtag.key_dns_name("k1", "example.test"))
+// ```
+pub fn key_dns_name(selector: Str, domain: Str) -> Str []
+    todo("dkim-nv.dkimtag.key_dns_name")
+
+// A `_domainkey` TXT record, parsed from the strings a resolver
+// answered.
+//
+// A LIST of strings, concatenated before parsing, which § 3.6.2.2
+// requires — a TXT record is character-strings of at most 255 bytes
+// each, and every RSA key is longer than one.  A caller handing over
+// the first string alone would parse a truncated key, which fails
+// verification with no indication that the record was fine.
+//
+// `dns-codec-nv`'s `RdataTxt(strings: [[u8]])` is exactly this shape;
+// this package takes the value and does not resolve anything.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_key_record([])
+//         Ok(k)  => println(k.key_type)
+//         Err(e) => println(e.message())
+// ```
+pub fn parse_key_record(strings: [[u8]]) -> Result<DkimKeyRecord, DkimFault> []
+    todo("dkim-nv.dkimtag.parse_key_record")
+
+// Has this key been revoked?
+//
+// An EMPTY `p=` and not a missing record, § 3.6.1.  The distinction is
+// the whole point of publishing a revocation: an absent record means
+// "this selector was never used" and an empty key means "it was, and
+// every signature naming it is now invalid".  A verifier that treated
+// them alike would accept a signature the domain owner has withdrawn.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_key_record([])
+//         Err(e) => println(e.message())
+//         Ok(k)  => println("${dkimtag.key_is_revoked(k)}")
+// ```
+pub fn key_is_revoked(k: DkimKeyRecord) -> Bool []
+    todo("dkim-nv.dkimtag.key_is_revoked")
+
+// Is this key published for testing only — the `y` flag?
+//
+// § 3.6.1: a verifier MUST NOT treat a failure against a testing key as
+// evidence of anything.  Published as a predicate because a verdict
+// that folded it in would make "this failed" and "this failed and the
+// domain told you not to care" the same answer.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_key_record([])
+//         Err(e) => println(e.message())
+//         Ok(k)  => println("${dkimtag.key_is_testing(k)}")
+// ```
+pub fn key_is_testing(k: DkimKeyRecord) -> Bool []
+    todo("dkim-nv.dkimtag.key_is_testing")
+
+// Does the key's `t=s` flag hold, given the signature's `i=` and `d=`?
+//
+// `s` means the identity's domain must equal the signing domain
+// EXACTLY rather than being a subdomain of it.  A rule with no visible
+// effect until the day a subdomain is compromised, which is the day it
+// matters.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_key_record([])
+//         Err(e) => println(e.message())
+//         Ok(k)  => println("${dkimtag.identity_allowed(k, "a@mail.example.test", "example.test")}")
+// ```
+pub fn identity_allowed(k: DkimKeyRecord, identity: Str, domain: Str) -> Bool []
+    todo("dkim-nv.dkimtag.identity_allowed")
+
+// May this key be used with this algorithm?
+//
+// `k=` has to match the algorithm's key type and `h=`, when present,
+// has to list its hash.  Both are the domain owner narrowing what its
+// own key may do, and a verifier that ignored them would accept a
+// signature the owner's DNS forbids.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     match dkimtag.parse_key_record([])
+//         Err(e) => println(e.message())
+//         Ok(k)  => println("${dkimtag.key_allows(k, DkimEd25519Sha256)}")
+// ```
+pub fn key_allows(k: DkimKeyRecord, a: DkimAlgorithm) -> Bool []
+    todo("dkim-nv.dkimtag.key_allows")
+
+// The algorithm a token names.
+//
+// Never fails: an unrecognised token becomes `DkimAlgUnknown` with the
+// text, because a verifier must report "I cannot verify this algorithm"
+// rather than "this is not a signature".
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println(dkimtag.algorithm_token(dkimtag.algorithm_of_token("ed25519-sha256")))
+// ```
+pub fn algorithm_of_token(token: Str) -> DkimAlgorithm []
+    todo("dkim-nv.dkimtag.algorithm_of_token")
+
+// The algorithm as the `a=` tag writes it.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println(dkimtag.algorithm_token(DkimEd25519Sha256))
+// ```
+pub fn algorithm_token(a: DkimAlgorithm) -> Str []
+    todo("dkim-nv.dkimtag.algorithm_token")
+
+// Is this algorithm one a conforming implementation may still use?
+//
+// False for `rsa-sha1`, which RFC 8301 forbids for both signing and
+// verifying, and for anything unknown.  A predicate rather than a
+// missing variant, so a verdict can say WHY rather than reporting a
+// parse failure for a header that parsed perfectly well.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println("${dkimtag.algorithm_is_permitted(DkimRsaSha1)}")
+// ```
+pub fn algorithm_is_permitted(a: DkimAlgorithm) -> Bool []
+    todo("dkim-nv.dkimtag.algorithm_is_permitted")
+
+// Does this implementation carry the primitive this algorithm needs?
+//
+// FALSE FOR `rsa-sha256` TODAY, and that is the honest form of the gap:
+// nothing on this grid implements RSA, so the algorithm almost every
+// signature in the world uses cannot be completed here.  A verifier
+// answers `DkimVerdictUnsupported` rather than `DkimVerdictFail`,
+// because "I cannot check this" and "this is forged" are different
+// things to tell an operator and only one of them is a reason to
+// quarantine a message.
+//
+// ```novo
+// use dkimtag
+//
+// fn main() [io]
+//     println("${dkimtag.algorithm_is_available(DkimRsaSha256)}")
+// ```
+pub fn algorithm_is_available(a: DkimAlgorithm) -> Bool []
+    todo("dkim-nv.dkimtag.algorithm_is_available")

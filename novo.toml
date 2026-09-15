@@ -1,7 +1,7 @@
 [package]
 name        = "dkim-nv"
 license     = "Apache-2.0"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "DKIM (RFC 6376) as arithmetic over a caller's bytes: the simple and relaxed canonicalisations for header and body, the body hash with its l= length, the DKIM-Signature and _domainkey tag grammars parsed and written, signing over a DkimSigner[e] the caller supplies, and verification against a DNS TXT record the caller already fetched, answering a five-way verdict with its reason.  Interface only — every body is a todo()."
 
 # `license` sits immediately after the name, before any value that could
